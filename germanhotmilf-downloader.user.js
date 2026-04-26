@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         GermanHotMilf Gallery Downloader
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.2
 // @description  Download all full-size photos from a gallery with one click.
 // @author       mcscraper
 // @match        https://german-hotmilf.com/gallery/*
-// @grant        GM_download
+// @grant        GM_xmlhttpRequest
 // @grant        GM_notification
 // @run-at       document-end
 // ==/UserScript==
@@ -150,14 +150,24 @@
     }
 
     function downloadFile(url, filename) {
+        // Fetch as blob, then trigger via <a download> — the only method that
+        // reliably forces our filename regardless of Content-Disposition headers.
         return new Promise(resolve => {
-            GM_download({
+            GM_xmlhttpRequest({
+                method: 'GET',
                 url,
-                name: filename,
-                saveAs: false,
-                onerror:   e  => { LOG(`DL error ${filename}:`, e); resolve(); },
-                ontimeout: () => { LOG(`DL timeout ${filename}`);   resolve(); },
-                onload:    () => resolve(),
+                responseType: 'blob',
+                onload(r) {
+                    const blobUrl = URL.createObjectURL(r.response);
+                    const a = document.createElement('a');
+                    a.href     = blobUrl;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => { URL.revokeObjectURL(blobUrl); resolve(); }, 1000);
+                },
+                onerror: e => { LOG(`Fetch error ${filename}:`, e); resolve(); },
             });
         });
     }
