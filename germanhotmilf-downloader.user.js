@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         GermanHotMilf Gallery Downloader
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  Download all full-size photos from a gallery with one click.
 // @author       mcscraper
 // @match        https://german-hotmilf.com/gallery/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
+// @grant        unsafeWindow
+// @connect      centrofiles.com
 // @run-at       document-end
 // ==/UserScript==
 
@@ -44,6 +46,22 @@
     btn.addEventListener('click', async () => {
         btn.disabled = true;
         setStatus('⏳ Loading…', '#2980b9');
+
+        // Ask for a save folder while we still have the user-gesture context.
+        const pageWindow = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+        let dirHandle = null;
+        if (typeof pageWindow.showDirectoryPicker === 'function') {
+            try {
+                dirHandle = await pageWindow.showDirectoryPicker({ mode: 'readwrite' });
+            } catch (e) {
+                if (e.name === 'AbortError') {
+                    setStatus('❌ Cancelled', '#c0392b');
+                    btn.disabled = false;
+                    return;
+                }
+                LOG('showDirectoryPicker failed, falling back to GM_download:', e);
+            }
+        }
 
         // Scroll to trigger lazy-load of all thumbnails.
         const step = window.innerHeight * 0.85;
@@ -98,7 +116,6 @@
                 if (origSrc) {
                     dlSrc = origSrc;
                     LOG(`Origin URL: ${origSrc.slice(0, 80)}…`);
-                    // Toggle the real-pixels view back off before moving on.
                     origBtn.click();
                     await sleep(200);
                 } else {
@@ -106,9 +123,34 @@
                 }
             }
 
-            LOG(`Downloading [${i + 1}/${total}] id=${photoId}`);
             const pad  = String(i + 1).padStart(3, '0');
-            await downloadFile(dlSrc, `${galleryId}-${pad}.webp`);
+            const ext  = dlSrc.match(/\.(webp|jpe?g|png)(?=[?#]|$)/i)?.[1]
+                             ?.toLowerCase().replace('jpeg', 'jpg') ?? 'jpg';
+            const fname = `${galleryId}-${pad}.${ext}`;
+
+            LOG(`Saving [${i + 1}/${total}] as ${fname}`);
+
+            const blob = await fetchBlob(dlSrc);
+            if (!blob) {
+                LOG(`⚠ fetch failed for id=${photoId}`);
+                fail++;
+                continue;
+            }
+
+            if (dirHandle) {
+                try {
+                    const fh = await dirHandle.getFileHandle(fname, { create: true });
+                    const writable = await fh.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                } catch (e) {
+                    LOG(`Write error ${fname}:`, e);
+                    fail++;
+                    continue;
+                }
+            } else {
+                await downloadViaGM(dlSrc, fname);
+            }
             ok++;
 
             // Close the fullscreen viewer before clicking the next thumbnail.
@@ -135,7 +177,6 @@
         return document.querySelector('.gallery-full-image img')?.src ?? '';
     }
 
-    // Polls fn() every 120 ms until it returns a truthy value or timeout.
     function waitFor(fn, timeout) {
         return new Promise(resolve => {
             const deadline = Date.now() + timeout;
@@ -149,10 +190,20 @@
         });
     }
 
-    function downloadFile(url, filename) {
-        // Fetch as blob, then trigger via <a download> — the only method that
-        // reliably forces our filename regardless of Content-Disposition headers.
-        return new Promise(resolve => {
+    function fetchBlob(url) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                responseType: 'blob',
+                onload: (r) => resolve(r.response),
+                onerror: (e) => { LOG('Fetch error:', e); resolve(null); },
+            });
+        });
+    }
+
+    function downloadViaGM(url, filename) {
+        return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
                 url,
@@ -165,7 +216,7 @@
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
-                    setTimeout(() => { URL.revokeObjectURL(blobUrl); resolve(); }, 1000);
+                    setTimeout(() => { URL.revokeObjectURL(blobUrl); resolve(); }, 1500);
                 },
                 onerror: e => { LOG(`Fetch error ${filename}:`, e); resolve(); },
             });
